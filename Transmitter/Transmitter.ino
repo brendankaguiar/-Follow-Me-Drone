@@ -227,7 +227,7 @@ void set_data()//Max message size should be no more than 67 bytes
     msg.concat(VofZ);
   }
   if (msg.length() != BUFFER_LENGTH || sizeof(msg) != BUFFER_SIZE)
-    indicate(2); //Concatenated Messages are of incorrect length
+    indicate(1); //Concatenated Messages are of incorrect length
 }
 
 void transmit()
@@ -317,8 +317,7 @@ void indicate(unsigned int err_num)//Flashes LED n times to indicate error numbe
   enable ^= 0x01;//flips enable to turn off system
 }
 /* Error #      Description:
- * 1            Driver failed to initialize
- * 2            Concatenated Messages are of incorrect length
+ * 1            Concatenated Messages are of incorrect length
  *
  */
 
