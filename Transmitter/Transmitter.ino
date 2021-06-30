@@ -26,10 +26,13 @@
   GPS Module          No data on initial test.      0.9
   RF Transmitter      Not sending or receiving      1.0
   
-  Board in Use:
+  Microcontroller in Use:
   Elegoo Mega 2560
   
-  Pins in Use:      Description:
+  Manual:
+  tinyurl.com/77pxafds
+ 
+ Pins in Use:      Description:
   A15               Button Check
   D12               Transmitter Data Pin
   D10               LED Indicator
