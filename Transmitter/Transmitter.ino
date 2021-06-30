@@ -34,7 +34,7 @@
  
  Pins in Use:      Description:
   A15               Button Check
-  D12               Transmitter Data Pin
+  ***               Transmitter Data Pin
   D10               LED Indicator
   RX0               GPS Receiving Pin
   TX0               GPS Transmitting Pin
