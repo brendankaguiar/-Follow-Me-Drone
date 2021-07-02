@@ -1,14 +1,16 @@
-/********************START OF TRANSMITTER.INO****************************/
+ /********************START OF TRANSMITTER.INO****************************/
 
 /*************************************************************************
 ***********************PROGRAM INFORMATION********************************
 **************************************************************************
-
   Transmitter for Drone
   By Brendan Aguiar
-  
-  Current Version: 1.1
 
+The gps will send a takeoff and the UBX NAV-SOL message when the takeoff button is enabled,
+if not, the transceiver continuously transmits the touchdown instruction to the receiver
+A system button will also enable and disable the system, while continuously sending touchdown instructions
+  
+  Current Version: 1.2
   Version History:
   Version 0.1 Set up Button to enable/disable system
   Version 0.2 Set up USART0 and delay
@@ -21,20 +23,18 @@
   Version 0.9 Set up NAV-SOL structure for GPS data
   Version 1.0 Cleaned up code and began tests. LED/Button confirmed
   Version 1.1 Switched from transmitter to transceiver
+  Version 1.2 Implemented takeoff and touchdown functionality
   
   Bugs/Issues         Status:                       Version:
   GPS Module          No data on initial test.      0.9
   RF Transmitter      Not sending or receiving      1.0
   
-  Microcontroller in Use:
+  Board in Use:
   Elegoo Mega 2560
   
-  Manual:
-  tinyurl.com/77pxafds
- 
- Pins in Use:      Description:
+  Pins in Use:      Description:
   A15               Button Check
-  ***               Transmitter Data Pin
+  *                 Transmitter Data Pin
   D10               LED Indicator
   RX0               GPS Receiving Pin
   TX0               GPS Transmitting Pin
@@ -44,11 +44,17 @@
 
 
 
-//Port K Assignments (Button)
+//Port K Assignments (System Button)
 volatile unsigned char* port_k = (unsigned char*)0x108;
 volatile unsigned char* ddr_k = (unsigned char*)0x107;
 volatile unsigned char* pin_k = (unsigned char*)0x106;
-unsigned char enable = 0x00;
+unsigned char system_enable = 0x00;
+
+//Port F Assignments (Takeoff Button)
+volatile unsigned char* port_f = (unsigned char*)0x31;
+volatile unsigned char* ddr_f = (unsigned char*)0x30;
+volatile unsigned char* pin_f = (unsigned char*)0x2F;
+unsigned char takeoff_enable = 0x00;
 
 //Timer1 Assignments (Delay)
 volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
@@ -65,7 +71,7 @@ volatile unsigned char* myUCSR0C = (unsigned char*)0x00C2; //Control & Status Re
 volatile unsigned int* myUBRR0 = (unsigned int*)0x00C4; //Baud Rate Register
 volatile unsigned char* myUDR0 = (unsigned char*)0x00C6; // Data Register
 
-//Transciever Assignments
+//Transceiver Assignments
 #include <SPI.h>
 #include <nRF24L01.h>
 #include <RF24.h>
@@ -78,7 +84,7 @@ volatile unsigned char* port_b = (unsigned char*)0x25;
 volatile unsigned char* ddr_b = (unsigned char*)0x24;
 volatile unsigned char* pin_b = (unsigned char*)0x23;
 
-/********************************GPS Structure***************************************/
+/********************************GPS Structure (Beacon)*********************************/
 const unsigned char UBX_HEADER[] = { 0xB5, 0x62 };
 struct NAV_SOL {
   unsigned char cls;
@@ -154,18 +160,9 @@ bool processGPS() {
 }
 
 //Messenger Assignments
-String posX;
-String posY; 
-String posZ;
-String VofX;
-String VofY;
-String VofZ;
-char pDOP;//Accuracy of GPS 9 and higher is considered weak
-#define BUFFER_LENGTH 36 //in Characters
-const char msg[BUFFER_LENGTH]; // Complete message
-bool sendData = true; // Set to true to continuously transmit data
-#define BUFFER_SIZE 288 //in Bytes
-
+#define BUFFER_LENGTH 24 //in unsigned chars
+unsigned char msg[BUFFER_LENGTH]; // Complete message
+#define BUFFER_SIZE 192 //in Bytes
 
 /*******************************************************************************
 ************************************Setup and Loop******************************
@@ -174,60 +171,88 @@ void setup()
 {
   set_LED();
   USART0init(9600); //Enable USART0 in asynchronous mode for GPS Communication
-  set_button();
-  set_transceiver();
-  set_message();
+  set_system();
+  set_takeoff();
+  set_transmitter();
 }
 
 void loop()
 {
-  button_check();
-  if (enable & 0x01)
+  system_check();
+  if (system_enable & 0x01)
   {
     *port_b |= 0b00010000;//Turn on LED
-    set_data();
-    transmit();
-    my_delay(1000);
+    takeoff_check();
+    if (takeoff_enable & 0x01)
+    {
+      if (msg[0] == 0xF0)
+      {
+        msg[0] = 0xFF;
+        transmit();
+        my_delay(1000);  
+      }
+      set_msg();
+      my_delay(500);
+      *port_b &= !0b00010000;//Toggle LED to indicate message transmitting
+    }
+    else
+    touchdown();
   }
   else
   {
+    if (takeoff_enable & 0x01) //If takeoff still on
+    {
+      takeoff_enable ^= 0x01;
+    }
     *port_b &= !0b00010000;//Turn off LED
+    touchdown(); //continuously send touchdown message
   }
 }
 
+
 /*****************************Loop Functions****************************************/
-void button_check()//system_enable
+void system_check()//system_enable
 {
   if (!(*pin_k & 0x80))//if button pressed
   {
     for (volatile unsigned int i = 0; i < 1000; i++);//wait
     if (!(*pin_k & 0x80))//if button still pressed
     {
-      enable ^= 0x01;//flips enable
+      system_enable ^= 0x01;//flips enable
       while (!(*pin_k & 0x80));
     }
   }
 }
 
-void set_data()//Max message size should be no more than 67 bytes
+void takeoff_check()
+{
+  if (!(*pin_f & 0x80))//if button pressed
+  {
+    for (volatile unsigned int i = 0; i < 1000; i++);//wait
+    if (!(*pin_f & 0x80))//if button still pressed
+    {
+      takeoff_enable ^= 0x01;//flips enable
+      while (!(*pin_f & 0x80));
+    }
+  }
+}
+
+void set_msg()//Max message size should be no more than 67 bytes
 {
   if (processGPS())//updates message for pos. and velocity
-  {    
-    posX = String(sol.ecefX);
-    posY = String(sol.ecefY);
-    posZ = String(sol.ecefZ);
-    VofX = String(sol.ecefVX);
-    VofY = String(sol.ecefVY);
-    VofZ = String(sol.ecefVZ);
-    msg.concat(posX); //appending complete message
-    msg.concat(posY);
-    msg.concat(posZ);
-    msg.concat(VofX); //appending complete message
-    msg.concat(VofY);
-    msg.concat(VofZ);
+  { 
+    for (int i = 0; i < 4; i++)
+    {
+      msg[i] = (int)((sol.ecefX >> 24 - (8 * i)) & 0xFF);
+      msg[i + 4] = (int)((sol.ecefY >> 24 - (8 * i)) & 0xFF);    
+      msg[i + 8] = (int)((sol.ecefZ >> 24 - (8 * i)) & 0xFF);
+      msg[i + 12] = (int)((sol.ecefVX >> 24 - (8 * i)) & 0xFF);
+      msg[i + 16] = (int)((sol.ecefVY >> 24 - (8 * i)) & 0xFF);
+      msg[i + 20] = (int)((sol.ecefVZ >> 24 - (8 * i)) & 0xFF);
+    }
   }
-  if (msg.length() != BUFFER_LENGTH || sizeof(msg) != BUFFER_SIZE)
-    indicate(1); //Concatenated Messages are of incorrect length
+  if (sizeof(msg) != BUFFER_SIZE)
+    indicate(2); //Concatenated Messages are of incorrect length
 }
 
 void transmit()
@@ -259,12 +284,25 @@ unsigned char U0getchar()
   return *myUDR0;
 }
 
+void touchdown() //Send touchdown message
+{
+  msg[0] = 0xF0;
+  transmit();
+  my_delay(1000);
+}
 
 /***************************Setup Functions****************************************/
-void set_button()
+void set_system()
 {
   *ddr_k &= 0b01111111; //k7 port set to input (Analog 15 for elegoo MEGA 2560)
   *port_k |= 0b10000000; //Enable pullup resistor
+}
+
+void set_takeoff()
+{
+  *ddr_f &= 0b01111111; //f7 port set to input (Analog 7 for elegoo MEGA 2560)
+  *port_f |= 0b10000000; //Enable pullup resistor
+  msg[0] = 0xF0; //initializes message to touchdown
 }
 
 void set_LED()
@@ -283,23 +321,12 @@ void USART0init(unsigned long U0baud)
   *myUBRR0 = tbaud; //Set Baud Rate
 }
 
-void set_transceiver()
+void set_transmitter()
 {
   radio.begin();
   radio.openWritingPipe(address);
   radio.setPALevel(RF24_PA_MIN);
   radio.stopListening();
-}
-
-void set_message()
-{//reserve buffer space for message
-  posX.reserve(64);
-  posY.reserve(64);
-  posZ.reserve(64);
-  VofX.reserve(32);
-  VofY.reserve(32);
-  VofZ.reserve(32);
-  msg.reserve(BUFFER_SIZE);
 }
 
 /*****************************Error Function****************************************/
@@ -314,10 +341,11 @@ void indicate(unsigned int err_num)//Flashes LED n times to indicate error numbe
     *port_b &= !0b00010000;//Turn off LED
     my_delay(1000);
   }
-  enable ^= 0x01;//flips enable to turn off system
+  system_enable ^= 0x01;//flips enable to turn off system
 }
 /* Error #      Description:
- * 1            Concatenated Messages are of incorrect length
+ * 1            Driver failed to initialize
+ * 2            Concatenated Messages are of incorrect length
  *
  */
 
