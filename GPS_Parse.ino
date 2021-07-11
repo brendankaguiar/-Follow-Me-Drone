@@ -15,9 +15,14 @@ float Altref = 0; //Geoid Separation
 char uSep = 'I'; //Units of Separation
 float diffAge = 0;
 
+//GPS PIN OUT
+/*
+GPS MODULE RX -------------//Unused
+GPS MODULE TX ------------> Arduino RX1
+*/
 void setup() {
-  Serial1.begin(9600);
-  Serial.begin(9600);
+  Serial1.begin(9600);//For GPS
+  Serial.begin(9600);//For computer monitor
 }
 
 void loop() {
