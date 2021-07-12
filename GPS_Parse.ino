@@ -48,10 +48,10 @@ void loop() {
     Altref = atof(buff[10]);
     uSep = buff[11][0];
     diffAge = atof(buff[12]);
-    Serial.println(LAT);
-    Serial.println(LON);
-    Serial.println(ALT);
   }
+  Serial.println(LAT);
+  Serial.println(LON);
+  Serial.println(ALT);
 }
 void parseData()
 {
