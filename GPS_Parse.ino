@@ -15,14 +15,9 @@ float Altref = 0; //Geoid Separation
 char uSep = 'I'; //Units of Separation
 float diffAge = 0;
 
-//GPS PIN OUT
-/*
-GPS MODULE RX -------------//Unused
-GPS MODULE TX ------------> Arduino RX1
-*/
 void setup() {
-  Serial1.begin(9600);//For GPS
-  Serial.begin(9600);//For computer monitor
+  Serial1.begin(9600);
+  Serial.begin(9600);
 }
 
 void loop() {
@@ -32,9 +27,11 @@ void loop() {
     // read the incoming byte:
     Byte = Serial1.read();
     if (Byte == '$')//start of new data
+    {
       inByte = Serial1.readStringUntil('\n');//read until return
+      parseData();//parse data into buff
+    }
   }
-  parseData();//parse data into buff
   //Serial.println(buff[0]);
   if (inByte[3] == 'G')//Handle GPGGA
   {
@@ -62,16 +59,16 @@ void parseData()
   int k = 0;;
   for (int i = 6; i < inByte.length(); i++)
   {
-    if (inByte[i] != ',')
-    {
-      buff[j][k] = inByte[i];
-    }
-    else if (inByte[i] == ',')
+    
+    if (inByte[i] == ',')
     {
       j++;
       k = 0;
     }
     else
+    {
+      buff[j][k] = inByte[i];
       k++;
+    }
   }  
 }
