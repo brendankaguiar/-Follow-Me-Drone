@@ -1,6 +1,5 @@
 //GGA Assignments
 String inByte;
-char Byte;
 char buff1[12][12];
 float UTC = 0;//Time
 float LAT = 0; //Latitude
