@@ -1,16 +1,17 @@
- /********************START OF TRANSMITTER.INO****************************/
+ /********************START OF BEACON.INO****************************/
 
 /*************************************************************************
 ***********************PROGRAM INFORMATION********************************
 **************************************************************************
-  Transmitter for Drone
+  Beacon Transmitter for drone
   By Brendan Aguiar
 
-The gps will send a takeoff and the UBX NAV-SOL message when the takeoff button is enabled,
-if not, the transceiver continuously transmits the touchdown instruction to the receiver
-A system button will also enable and disable the system, while continuously sending touchdown instructions
+When enabled, the system will be on standby and sending touchdown instructions to the drone. 
+When takeoff is enabled, the becaon will send the longitude (LON), latitude (LAT), altitude (ALT) and compass heading (alpha) 
+to the drone via a transceiver. This will only happen if the GPS signal has been acquired by checking the fix (fixStatus).
+If the system is put into standby or shut off, the beacon will send a touchdown command to the drone once again.
   
-  Current Version: 1.2
+  Current Version: 1.3
   Version History:
   Version 0.1 Set up Button to enable/disable system
   Version 0.2 Set up USART0 and delay
@@ -24,6 +25,8 @@ A system button will also enable and disable the system, while continuously send
   Version 1.0 Cleaned up code and began tests. LED/Button confirmed
   Version 1.1 Switched from transmitter to transceiver
   Version 1.2 Implemented takeoff and touchdown functionality
+  Version 1.3 changed GPS sentence to NMEA based GPGGA and restructured syntax
+  Version 1.4 Added Magnetometer for compass heading
   
   Bugs/Issues         Status:                       Version:
   GPS Module          No data on initial test.      0.9
@@ -39,314 +42,231 @@ A system button will also enable and disable the system, while continuously send
   RX0               GPS Receiving Pin
   TX0               GPS Transmitting Pin
 ***************************************************************************
-************************REGISTER ASSIGNMENTS*******************************
+************************ASSIGNMENTS*******************************
 **************************************************************************/
-
-
-
-//Port K Assignments (System Button)
-volatile unsigned char* port_k = (unsigned char*)0x108;
-volatile unsigned char* ddr_k = (unsigned char*)0x107;
-volatile unsigned char* pin_k = (unsigned char*)0x106;
-unsigned char system_enable = 0x00;
-
-//Port F Assignments (Takeoff Button)
-volatile unsigned char* port_f = (unsigned char*)0x31;
-volatile unsigned char* ddr_f = (unsigned char*)0x30;
-volatile unsigned char* pin_f = (unsigned char*)0x2F;
-unsigned char takeoff_enable = 0x00;
-
-//Timer1 Assignments (Delay)
-volatile unsigned char *myTCCR1A = (unsigned char *) 0x80;
-volatile unsigned char *myTCCR1B = (unsigned char *) 0x81;
-volatile unsigned char *myTCCR1C = (unsigned char *) 0x82;
-volatile unsigned char *myTIMSK1 = (unsigned char *) 0x6F;
-volatile unsigned int  *myTCNT1  = (unsigned  int *) 0x84;
-volatile unsigned char *myTIFR1 =  (unsigned char *) 0x36;
-
-//UART0 Assignments (GPS Reception)
-volatile unsigned char* myUCSR0A = (unsigned char*)0x00C0; //Control & Status Register A
-volatile unsigned char* myUCSR0B = (unsigned char*)0x00C1; //Control & Status Register B
-volatile unsigned char* myUCSR0C = (unsigned char*)0x00C2; //Control & Status Register C
-volatile unsigned int* myUBRR0 = (unsigned int*)0x00C4; //Baud Rate Register
-volatile unsigned char* myUDR0 = (unsigned char*)0x00C6; // Data Register
-
 //Transceiver Assignments
-#include <SPI.h>
 #include <nRF24L01.h>
+#include <printf.h>
 #include <RF24.h>
-RF24 radio(7, 8); // CE, CSN
-const byte address[6] = "ALPHA";//Communication line 1
-//const byte address[6] = "BRAVO";//Communication line 1
+#include <RF24_config.h>
+RF24 radio(9, 10); // CE, CSN         
+const byte address[6] = "00001";
+#define BUFF_LENGTH 12  
+unsigned char msg[BUFF_LENGTH]; // Complete message
 
-//Port B Assignments (LED Indicator)
+//GGA Assignments
+String inByte;
+char Byte;
+char buff[13][12];
+float UTC = 0;//Time
+float LAT = 0; //Latitude
+char LATDir = 'I'; //Direction
+float LON = 0; //Longitude
+char LONDir = 'I'; //Direction
+unsigned int fixStatus; //Quality Indicator
+int NoSVs = 0; //Number of Satelites in use
+float HDop = 0; //Height Dilution of Precision
+float ALT = 0; //Altitude
+char ALTUnit = 'I'; //Altitude unit in meters
+float Sep = 0; //Geoid Separation
+char uSep = 'I'; //Units of Separation
+float diffAge = 0; //Age of Differential Connections
+
+//Compass Assignments
+#include <Wire.h>
+int x, y, z; //magnetic field strength
+int alpha; //orientation of device
+
+//Port B Assignments LED Indicators
+//D10               RED LED (System)
+//D11               GREEN LED (Takeoff)
 volatile unsigned char* port_b = (unsigned char*)0x25;
 volatile unsigned char* ddr_b = (unsigned char*)0x24;
 volatile unsigned char* pin_b = (unsigned char*)0x23;
 
-/********************************GPS Structure (Beacon)*********************************/
-const unsigned char UBX_HEADER[] = { 0xB5, 0x62 };
-struct NAV_SOL {
-  unsigned char cls;
-  unsigned char id;
-  unsigned short len;
-  unsigned long iTOW;
-  long fTOW;
-  signed short week;
-  unsigned char gpsFix;
-  boolean flags;
-  signed long ecefX; //cm
-  signed long ecefY; //cm
-  signed long ecefZ; //cm
-  unsigned long pAcc; //3D Pos Accuracy Estimate in cm
-  signed long ecefVX; //cm/s
-  signed long ecefVY; //cm/s
-  signed long ecefVZ; //cm/s
-  unsigned long sAcc; //Speed Accuracy Estimate in cm
-  unsigned short pDOP; //Position DOP
-  unsigned char reserved1; //Reserved
-  unsigned char numSV; //number of SVs used in Nav Soln.
-  unsigned long reserved2; //Reserved
-};
-NAV_SOL sol; 
+//Port K Assignments Buttons
+//A14                (system)
+//A15                (takeoff)
+volatile unsigned char* port_k = (unsigned char*)0x108;
+volatile unsigned char* ddr_k = (unsigned char*)0x107;
+volatile unsigned char* pin_k = (unsigned char*)0x106;
+unsigned char system_enable = 0x00;
+unsigned char takeoff_enable = 0x00;
+unsigned char sys = 0x80;//system port
+unsigned char takeoff = 0x40;//takeoff port
 
-//GPS Methods
-void calcChecksum(unsigned char* CK) {
-  memset(CK, 0, 2);
-  for (int i = 0; i < (int)sizeof(NAV_SOL); i++) {
-    CK[0] += ((unsigned char*)(&sol))[i];
-    CK[1] += CK[0];
+void setup() {
+  *ddr_b |= 0b00110000; //b3, b4 port set to Output (Digital 11, 10 for elegoo MEGA 2560)
+  setup_buttons();
+  //setup_compass();
+  setup_transceiver();
+  Serial1.begin(9600);//Setup GPS
+}
+void loop() {
+  button_check(sys);
+  if (system_enable & 0x01){
+    set_LED("RED");
+    button_check(takeoff);
+    if (takeoff_enable & 0x01){
+      set_LED("GREEN");
+      //get_alpha();
+      get_GPS();
+      if (fixStatus == 1)
+        send_takeoff();
+    }
+    else if (port_b == 0b00100000){//if green light is on
+      send_touchdown();
+    } 
+  }
+  else {
+     set_LED("OFF");
+     if (takeoff_enable & 0x01){
+        send_touchdown();
+        takeoff_enable ^= 0x01;
+     }
   }
 }
+void send_takeoff() {
+  msg[0] = (int)(((signed long)LON >> 24) & 0xFF);
+  msg[1] = (int)(((signed long)LON >> 16) & 0xFF);
+  msg[2] = (int)(((signed long)LON >> 8) & 0xFF);
+  msg[3] = (int)(((signed long)LON & 0xFF));
+  msg[4] = (int)(((signed long)LAT >> 24) & 0xFF);
+  msg[5] = (int)(((signed long)LAT >> 16) & 0xFF);
+  msg[6] = (int)(((signed long)LAT >> 8) & 0xFF);
+  msg[7] = (int)(((signed long)LAT & 0xFF));  
+  msg[8] = (int)(((signed long)ALT >> 24) & 0xFF);
+  msg[9] = (int)(((signed long)ALT >> 16) & 0xFF);
+  msg[10] = (int)(((signed long)ALT >> 8) & 0xFF);
+  msg[11] = (int)(((signed long)ALT & 0xFF));/*
+  msg[12] = (int)(((signed long)alpha >> 24) & 0xFF);
+  msg[13] = (int)(((signed long)alpha >> 16) & 0xFF);
+  msg[14] = (int)(((signed long)alpha >> 8) & 0xFF);
+  msg[15] = (int)(((signed long)alpha & 0xFF));/*
+  */
+  transmit();
+}
+void send_touchdown() //Send touchdown message
+{
+  msg[0] = 0xFF;
+  transmit();
+}
 
-bool processGPS() {
-  static int fpos = 0; //field position
-  static unsigned char checksum[2];
-  const int payloadSize = sizeof(NAV_SOL); //52 bytes
-
-  while (U0kbhit() == 0) {
-    byte c = U0getchar();
-    if (fpos < 2) {
-      if (c == UBX_HEADER[fpos])
-        fpos++;
-      else
-        fpos = 0;
-    }
-    else {
-      if ( (fpos-2) < payloadSize )
-        ((unsigned char*)(&sol))[fpos-2] = c;
-
-      fpos++;
-
-      if ( fpos == (payloadSize+2) ) {
-        calcChecksum(checksum);
-      }
-      else if ( fpos == (payloadSize+3) ) {
-        if ( c != checksum[0] )
-          fpos = 0;
-      }
-      else if ( fpos == (payloadSize+4) ) {
-        fpos = 0;
-        if ( c == checksum[1] ) {
-          return true;
-        }
-      }
-      else if ( fpos > (payloadSize+4) ) {
-        fpos = 0;
-      }
+void transmit() {
+  radio.write(&msg, sizeof(msg));
+  //delay(500);
+}
+void get_GPS() {
+  if (Serial1.available()) { // read the incoming byte:
+    Byte = Serial1.read();
+    if (Byte == '$') { //start of new data
+      inByte = Serial1.readStringUntil('\n');//read until return
+      if (inByte[3] == 'G')
+        parseData();//parse data into buff
     }
   }
-  return false;
+  clearBuff();
 }
 
-//Messenger Assignments
-#define BUFFER_LENGTH 24 //in unsigned chars
-unsigned char msg[BUFFER_LENGTH]; // Complete message
-#define BUFFER_SIZE 192 //in Bytes
-
-/*******************************************************************************
-************************************Setup and Loop******************************
-*******************************************************************************/
-void setup()
+void clearBuff()
 {
-  set_LED();
-  USART0init(9600); //Enable USART0 in asynchronous mode for GPS Communication
-  set_system();
-  set_takeoff();
-  set_transmitter();
+  for (int i= 0; i < 13; i++)
+    for (int j = 0; j < 12; j++)
+      buff[i][j] = 0;
 }
-
-void loop()
-{
-  system_check();
-  if (system_enable & 0x01)
+void parseData() {
+  int j = 0;
+  int k = 0;;
+  for (int i = 6; i < inByte.length(); i++)
   {
-    *port_b |= 0b00010000;//Turn on LED
-    takeoff_check();
-    if (takeoff_enable & 0x01)
+    
+    if (inByte[i] == ',')
     {
-      if (msg[0] == 0xF0)
-      {
-        msg[0] = 0xFF;
-        transmit();
-        my_delay(1000);  
-      }
-      set_msg();
-      my_delay(500);
-      *port_b &= !0b00010000;//Toggle LED to indicate message transmitting
+      j++;
+      k = 0;
     }
     else
-    touchdown();
-  }
-  else
-  {
-    if (takeoff_enable & 0x01) //If takeoff still on
     {
-      takeoff_enable ^= 0x01;
+      buff[j][k] = inByte[i];
+      k++;
     }
-    *port_b &= !0b00010000;//Turn off LED
-    touchdown(); //continuously send touchdown message
+  } 
+  loadData();
+}
+void loadData() {
+  UTC = atof(buff[0]);
+  LAT = atof(buff[1]);
+  LATDir = buff[2][0];
+  LON = atof(buff[3]);
+  LONDir = buff[4][0];
+  fixStatus = atoi(buff[5]);
+  NoSVs = atoi(buff[6]);
+  HDop = atof(buff[7]);
+  ALT = atof(buff[8]);
+  ALTUnit = buff[9][0];
+  Sep = atof(buff[10]);
+  uSep = buff[11][0];
+  diffAge = atof(buff[12]);
+}
+void get_alpha() {
+  Wire.beginTransmission(0x1E);
+  Wire.write(0x03); //select register 3, X MSB register
+  Wire.endTransmission();
+  Wire.requestFrom(0x1E, 6);
+  if(6<=Wire.available()){
+    x = Wire.read()<<8; //X msb
+    x |= Wire.read(); //X lsb
+    z = Wire.read()<<8; //Z msb
+    z |= Wire.read(); //Z lsb
+    y = Wire.read()<<8; //Y msb
+    y |= Wire.read(); //Y lsb
+  }
+  alpha = atan2(x, y) / 0.0174532925;
+  if(alpha < 0){
+    alpha += 360;
+    alpha = 360 - alpha;
   }
 }
-
-
-/*****************************Loop Functions****************************************/
-void system_check()//system_enable
-{
-  if (!(*pin_k & 0x80))//if button pressed
-  {
+void setup_transceiver(){
+  radio.begin();                  //Starting the Wireless communication
+  radio.openWritingPipe(address); //Setting the address where we will send the data
+  radio.setPALevel(RF24_PA_MIN);  //You can set it as minimum or maximum depending on the distance between the transmitter and receiver.
+  radio.stopListening();          //This sets the module as transmitter
+}
+void setup_compass(){
+  Wire.begin();
+  //Put the HMC5883 IC into the correct operating mode
+  Wire.beginTransmission(0x1E); //open communication with HMC5883
+  Wire.write(0x02); //select mode register
+  Wire.write(0x00); //continuous measurement mode
+  Wire.endTransmission();
+}
+void setup_buttons() {
+  *ddr_k &= 0b00111111; //k7 {system}, k6 {takeoff} pins set to input (Analog 15, 14 for elegoo MEGA 2560) 
+  *port_k |= 0b11000000; //Enable pullup resistors
+}
+void button_check(unsigned char button) {
+  if (!(*pin_k & button)) { //if button pressed
     for (volatile unsigned int i = 0; i < 1000; i++);//wait
-    if (!(*pin_k & 0x80))//if button still pressed
-    {
-      system_enable ^= 0x01;//flips enable
-      while (!(*pin_k & 0x80));
+    if (!(*pin_k & button)){ //if button still pressed
+      if(button == sys)
+        system_enable ^= 0x01;//flips enable
+      else
+        takeoff_enable ^= 0x01;//flips takeoff
     }
+    while (!(*pin_k & button));
   }
 }
-
-void takeoff_check()
-{
-  if (!(*pin_f & 0x80))//if button pressed
-  {
-    for (volatile unsigned int i = 0; i < 1000; i++);//wait
-    if (!(*pin_f & 0x80))//if button still pressed
-    {
-      takeoff_enable ^= 0x01;//flips enable
-      while (!(*pin_f & 0x80));
-    }
+void set_LED(String color) {
+  if (color == "RED"){
+    *port_b |= 0b00010000;//Turn on RED
+    *port_b &= !0b00100000;//Turn off GREEN 
   }
-}
-
-void set_msg()//Max message size should be no more than 67 bytes
-{
-  if (processGPS())//updates message for pos. and velocity
-  { 
-    for (int i = 0; i < 4; i++)
-    {
-      msg[i] = (int)((sol.ecefX >> 24 - (8 * i)) & 0xFF);
-      msg[i + 4] = (int)((sol.ecefY >> 24 - (8 * i)) & 0xFF);    
-      msg[i + 8] = (int)((sol.ecefZ >> 24 - (8 * i)) & 0xFF);
-      msg[i + 12] = (int)((sol.ecefVX >> 24 - (8 * i)) & 0xFF);
-      msg[i + 16] = (int)((sol.ecefVY >> 24 - (8 * i)) & 0xFF);
-      msg[i + 20] = (int)((sol.ecefVZ >> 24 - (8 * i)) & 0xFF);
-    }
+  else if (color == "GREEN"){
+    *port_b |= 0b00100000;//Turn on GREEN
+    *port_b &= !0b00010000;//Turn off RED
   }
-  if (sizeof(msg) != BUFFER_SIZE)
-    indicate(2); //Concatenated Messages are of incorrect length
+  else if (color == "OFF")
+     *port_b &= !0b00110000;//Turn off RED and GREEN
 }
-
-void transmit()
-{
-  radio.write(&msg, sizeof(msg));
-}
-
-void my_delay(unsigned int freq)
-{
-  double period = 1.0/double(freq); //calc period
-  double half_period = period/ 2.0f; //50% duty cycle  
-  double clk_period = 0.0000000625; //clock period def
-  unsigned int ticks = half_period / clk_period; //calc ticks
-  *myTCCR1B &= 0xF8; //stop the timer
-  *myTCNT1 = (unsigned int) (65536 - ticks); //set the counts
-  * myTCCR1B |= 0b00000001; //start the timer
-  while((*myTIFR1 & 0x01)==0); //wait for overflow
-  *myTCCR1B &= 0xF8; //stop the timer
-  *myTIFR1 |= 0x01; //reset TOV          
-}
-
-unsigned char U0kbhit() // Read USART0 RDA status bit and return non-zero true if set
-{
-  return *myUCSR0A & 0x80;
-}
-
-unsigned char U0getchar()
-{
-  return *myUDR0;
-}
-
-void touchdown() //Send touchdown message
-{
-  msg[0] = 0xF0;
-  transmit();
-  my_delay(1000);
-}
-
-/***************************Setup Functions****************************************/
-void set_system()
-{
-  *ddr_k &= 0b01111111; //k7 port set to input (Analog 15 for elegoo MEGA 2560)
-  *port_k |= 0b10000000; //Enable pullup resistor
-}
-
-void set_takeoff()
-{
-  *ddr_f &= 0b01111111; //f7 port set to input (Analog 7 for elegoo MEGA 2560)
-  *port_f |= 0b10000000; //Enable pullup resistor
-  msg[0] = 0xF0; //initializes message to touchdown
-}
-
-void set_LED()
-{
-  *ddr_b |= 0b00010000; //b4 port set to Output (Digital 10 for elegoo MEGA 2560)
-}
-
-void USART0init(unsigned long U0baud)
-{
-  unsigned long FCPU = 16000000; //set frequency olscillation
-  unsigned int tbaud;
-  tbaud = (FCPU / (16 * U0baud)) - 1;
-  *myUCSR0A = 0x20; //
-  *myUCSR0B = 0x18; //Enable Receive and Transmit
-  *myUCSR0C = 0x06; //Set to asynchronous mode
-  *myUBRR0 = tbaud; //Set Baud Rate
-}
-
-void set_transmitter()
-{
-  radio.begin();
-  radio.openWritingPipe(address);
-  radio.setPALevel(RF24_PA_MIN);
-  radio.stopListening();
-}
-
-/*****************************Error Function****************************************/
-void indicate(unsigned int err_num)//Flashes LED n times to indicate error number
-{
-  *port_b &= !0b00010000;//Turn off LED
-  my_delay(2000);
-  for (unsigned int i = 0; i < err_num; i++)
-  {
-    *port_b |= 0b00010000;//Turn on LED
-    my_delay(1000);
-    *port_b &= !0b00010000;//Turn off LED
-    my_delay(1000);
-  }
-  system_enable ^= 0x01;//flips enable to turn off system
-}
-/* Error #      Description:
- * 1            Driver failed to initialize
- * 2            Concatenated Messages are of incorrect length
- *
- */
-
- /***********************END OF TRANSMITTER.INO***********************************/
+ /***********************END OF BEACON.INO***********************************/
